@@ -72,6 +72,10 @@ gomp_thread_start (void *xdata)
   struct gomp_thread_pool *pool;
   void (*local_fn) (void *);
   void *local_data;
+  struct gomp_cpu_diag_scope cpu_scope = { 0 };
+
+  gomp_cpu_diag_worker ();
+  gomp_cpu_diag_begin (&cpu_scope, GOMP_CPU_RUNTIME);
 
 #if defined HAVE_TLS || defined USE_EMUTLS
   thr = &gomp_tls_data;
@@ -105,7 +109,7 @@ gomp_thread_start (void *xdata)
 
       gomp_barrier_wait (&team->barrier);
 
-      local_fn (local_data);
+      gomp_cpu_diag_call (local_fn, local_data);
       gomp_team_barrier_wait_final (&team->barrier);
       gomp_finish_task (task);
       gomp_barrier_wait_last (&team->barrier);
@@ -120,7 +124,7 @@ gomp_thread_start (void *xdata)
 	  struct gomp_team *team = thr->ts.team;
 	  struct gomp_task *task = thr->task;
 
-	  local_fn (local_data);
+	  gomp_cpu_diag_call (local_fn, local_data);
 	  gomp_team_barrier_wait_final (&team->barrier);
 	  gomp_finish_task (task);
 
@@ -137,6 +141,7 @@ gomp_thread_start (void *xdata)
   pthread_detach (pthread_self ());
   thr->thread_pool = NULL;
   thr->task = NULL;
+  gomp_cpu_diag_end (&cpu_scope);
   return NULL;
 }
 #endif
@@ -206,6 +211,7 @@ gomp_new_team (unsigned nthreads)
   team->work_share_cancelled = 0;
   team->team_cancelled = 0;
 
+  gomp_cpu_diag_team_begin (team);
   return team;
 }
 
@@ -305,7 +311,7 @@ gomp_team_start (void (*fn) (void *), void *data, unsigned nthreads,
 		 unsigned flags, struct gomp_team *team,
 		 struct gomp_taskgroup *taskgroup)
 {
-  struct gomp_thread_start_data *start_data;
+  struct gomp_thread_start_data *start_data = NULL;
   struct gomp_thread *thr, *nthr;
   struct gomp_task *task;
   struct gomp_task_icv *icv;
@@ -932,6 +938,7 @@ gomp_team_end (void)
      team->barrier in a inconsistent state, we need to use a different
      counter here.  */
   gomp_team_barrier_wait_final (&team->barrier);
+  gomp_cpu_diag_team_end (team);
   if (__builtin_expect (team->team_cancelled, 0))
     {
       struct gomp_work_share *ws = team->work_shares_to_free;

@@ -218,7 +218,7 @@ GOMP_parallel_sections (void (*fn) (void *), void *data,
   team = gomp_new_team (num_threads);
   gomp_sections_init (&team->work_shares[0], count);
   gomp_team_start (fn, data, num_threads, flags, team, NULL);
-  fn (data);
+  gomp_cpu_diag_call (fn, data);
   GOMP_parallel_end ();
 }
 

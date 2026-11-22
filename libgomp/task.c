@@ -416,10 +416,10 @@ GOMP_task (void (*fn) (void *), void *data, void (*cpyfn) (void *, void *),
 	  char *arg = (char *) (((uintptr_t) buf + arg_align - 1)
 				& ~(uintptr_t) (arg_align - 1));
 	  cpyfn (arg, data);
-	  fn (arg);
+	  gomp_cpu_diag_call (fn, arg);
 	}
       else
-	fn (data);
+	gomp_cpu_diag_call (fn, data);
       /* Access to "children" is normally done inside a task_lock
 	 mutex region, but the only way this particular task.children
 	 can be set is if this thread's task work function (fn)
@@ -1384,7 +1384,7 @@ gomp_barrier_handle_tasks (gomp_barrier_state_t state)
 		}
 	    }
 	  else
-	    child_task->fn (child_task->fn_data);
+	    gomp_cpu_diag_call (child_task->fn, child_task->fn_data);
 	  thr->task = task;
 	}
       else
@@ -1534,7 +1534,7 @@ GOMP_taskwait (void)
 		}
 	    }
 	  else
-	    child_task->fn (child_task->fn_data);
+	    gomp_cpu_diag_call (child_task->fn, child_task->fn_data);
 	  thr->task = task;
 	}
       else
@@ -1785,7 +1785,7 @@ gomp_task_maybe_wait_for_dependencies (void **depend)
 		}
 	    }
 	  else
-	    child_task->fn (child_task->fn_data);
+	    gomp_cpu_diag_call (child_task->fn, child_task->fn_data);
 	  thr->task = task;
 	}
       else
@@ -1989,7 +1989,7 @@ GOMP_taskgroup_end (void)
 		}
 	    }
 	  else
-	    child_task->fn (child_task->fn_data);
+	    gomp_cpu_diag_call (child_task->fn, child_task->fn_data);
 	  thr->task = task;
 	}
       else

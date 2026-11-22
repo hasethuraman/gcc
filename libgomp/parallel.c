@@ -165,11 +165,14 @@ void
 GOMP_parallel (void (*fn) (void *), void *data, unsigned num_threads,
 	       unsigned int flags)
 {
+  struct gomp_cpu_diag_scope cpu_scope = { 0 };
+  gomp_cpu_diag_begin (&cpu_scope, GOMP_CPU_RUNTIME);
   num_threads = gomp_resolve_num_threads (num_threads, 0);
   gomp_team_start (fn, data, num_threads, flags, gomp_new_team (num_threads),
 		   NULL);
-  fn (data);
+  gomp_cpu_diag_call (fn, data);
   ialias_call (GOMP_parallel_end) ();
+  gomp_cpu_diag_end (&cpu_scope);
 }
 
 unsigned
@@ -182,7 +185,7 @@ GOMP_parallel_reductions (void (*fn) (void *), void *data,
   taskgroup = gomp_parallel_reduction_register (rdata, num_threads);
   gomp_team_start (fn, data, num_threads, flags, gomp_new_team (num_threads),
 		   taskgroup);
-  fn (data);
+  gomp_cpu_diag_call (fn, data);
   ialias_call (GOMP_parallel_end) ();
   gomp_sem_destroy (&taskgroup->taskgroup_sem);
   free (taskgroup);

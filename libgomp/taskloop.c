@@ -214,7 +214,7 @@ GOMP_taskloop (void (*fn) (void *), void *data, void (*cpyfn) (void *, void *),
 	      ((TYPE *)arg)[1] = start;
 	      if (i == nfirst)
 		task_step -= step;
-	      fn (arg);
+	      gomp_cpu_diag_call (fn, arg);
 	      arg += arg_size;
 	      if (!priority_queue_empty_p (&task[i].children_queue,
 					   MEMMODEL_RELAXED))
@@ -247,7 +247,7 @@ GOMP_taskloop (void (*fn) (void *), void *data, void (*cpyfn) (void *, void *),
 	    ((TYPE *)data)[1] = start;
 	    if (i == nfirst)
 	      task_step -= step;
-	    fn (data);
+	    gomp_cpu_diag_call (fn, data);
 	    if (!priority_queue_empty_p (&task.children_queue,
 					 MEMMODEL_RELAXED))
 	      {

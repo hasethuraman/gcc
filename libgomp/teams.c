@@ -48,7 +48,7 @@ GOMP_teams_reg (void (*fn) (void *), void *data, unsigned int num_teams,
     num_teams = 3;
   gomp_num_teams = num_teams;
   for (gomp_team_num = 0; gomp_team_num < num_teams; gomp_team_num++)
-    fn (data);
+    gomp_cpu_diag_call (fn, data);
   gomp_num_teams = 1;
   gomp_team_num = 0;
   if (thread_limit)

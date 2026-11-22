@@ -34,7 +34,9 @@ static inline void
 futex_wait (int *addr, int val)
 {
   long res;
+  struct gomp_cpu_diag_scope cpu_scope = { 0 };
 
+  gomp_cpu_diag_begin (&cpu_scope, GOMP_CPU_FUTEX);
   register long r10 __asm__("%r10") = 0;
   __asm volatile ("syscall"
 		  : "=a" (res)
@@ -51,6 +53,7 @@ futex_wait (int *addr, int val)
 			"d" (val), "r" (r10)
 		      : "r11", "rcx", "memory");
     }
+  gomp_cpu_diag_end (&cpu_scope);
 }
 
 static inline void
@@ -83,6 +86,9 @@ static inline void
 futex_wait (int *addr, int val)
 {
   long res;
+  struct gomp_cpu_diag_scope cpu_scope = { 0 };
+
+  gomp_cpu_diag_begin (&cpu_scope, GOMP_CPU_FUTEX);
 
   __asm volatile ("int $0x80"
 		  : "=a" (res)
@@ -99,6 +105,7 @@ futex_wait (int *addr, int val)
 		        "d" (val), "S" (0)
 		      : "memory");
     }
+  gomp_cpu_diag_end (&cpu_scope);
 }
 
 static inline void

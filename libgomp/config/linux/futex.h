@@ -42,6 +42,8 @@
 static inline void
 futex_wait (int *addr, int val)
 {
+  struct gomp_cpu_diag_scope cpu_scope = { 0 };
+  gomp_cpu_diag_begin (&cpu_scope, GOMP_CPU_FUTEX);
   int err = syscall (SYS_futex, addr, gomp_futex_wait, val, NULL);
   if (__builtin_expect (err < 0 && errno == ENOSYS, 0))
     {
@@ -49,6 +51,7 @@ futex_wait (int *addr, int val)
       gomp_futex_wake &= ~FUTEX_PRIVATE_FLAG;
       syscall (SYS_futex, addr, gomp_futex_wait, val, NULL);
     }
+  gomp_cpu_diag_end (&cpu_scope);
 }
 
 static inline void

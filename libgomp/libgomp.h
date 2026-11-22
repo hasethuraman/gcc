@@ -73,6 +73,8 @@
 # pragma GCC visibility push(hidden)
 #endif
 
+#include "cpu-diagnostics.h"
+
 /* If we were a C++ library, we'd get this from <std/atomic>.  */
 enum memmodel
 {
@@ -610,6 +612,7 @@ struct gomp_team
   int team_cancelled;
 
   /* This array contains structures for implicit tasks.  */
+  uint64_t cpu_diag_sequence, cpu_diag_creator, cpu_diag_start, cpu_diag_work;
   struct gomp_task implicit_task[];
 };
 

@@ -48,6 +48,9 @@ extern int gomp_futex_wait, gomp_futex_wake;
 static inline int do_spin (int *addr, int val)
 {
   unsigned long long i, count = gomp_spin_count_var;
+  struct gomp_cpu_diag_scope cpu_scope = { 0 };
+
+  gomp_cpu_diag_begin (&cpu_scope, GOMP_CPU_SPIN);
 
   if (__builtin_expect (__atomic_load_n (&gomp_managed_threads,
                                          MEMMODEL_RELAXED)
@@ -55,9 +58,13 @@ static inline int do_spin (int *addr, int val)
     count = gomp_throttled_spin_count_var;
   for (i = 0; i < count; i++)
     if (__builtin_expect (__atomic_load_n (addr, MEMMODEL_RELAXED) != val, 0))
-      return 0;
+      {
+	gomp_cpu_diag_end (&cpu_scope);
+	return 0;
+      }
     else
       cpu_relax ();
+  gomp_cpu_diag_end (&cpu_scope);
   return 1;
 }
 

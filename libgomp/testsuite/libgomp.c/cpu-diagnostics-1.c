@@ -10,8 +10,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+extern void GOMP_cpu_diagnostics_flush (void);
 
 static void
 serial_work (void)
@@ -83,9 +86,14 @@ main (void)
 {
   pid_t child;
   int status;
+  unsigned i;
+  struct stat before, after;
   errno = EAGAIN;
   serial_work ();
   assert (errno == EAGAIN);
+  assert (fstat (STDERR_FILENO, &before) == 0);
+  if (S_ISREG (before.st_mode))
+    assert (before.st_size == 0);
   /* Fork before creating worker threads: inherited libgomp pools are not
      made fork-safe by the diagnostic reset. */
   child = fork ();
@@ -93,10 +101,26 @@ main (void)
   if (child == 0)
     {
       serial_work ();
-      exit (0);
+      GOMP_cpu_diagnostics_flush ();
+      _exit (0);
     }
   assert (waitpid (child, &status, 0) == child);
   assert (WIFEXITED (status) && WEXITSTATUS (status) == 0);
+  assert (fstat (STDERR_FILENO, &before) == 0);
   parallel_work ();
+  for (i = 0; i < 10000; i++)
+    {
+#pragma omp parallel num_threads(1)
+      {
+	assert (omp_get_num_threads () == 1);
+      }
+    }
+  usleep (1100000);
+  serial_work ();
+  assert (fstat (STDERR_FILENO, &after) == 0);
+  if (S_ISREG (before.st_mode))
+    assert (after.st_size == before.st_size);
+  GOMP_cpu_diagnostics_flush ();
+  GOMP_cpu_diagnostics_flush ();
   return 0;
 }

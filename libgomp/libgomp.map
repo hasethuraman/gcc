@@ -1,3 +1,8 @@
+LIBGOMP_CPU_DIAGNOSTICS_1.0 {
+  global:
+	GOMP_cpu_diagnostics_flush;
+};
+
 OMP_1.0 {
   global:
 	omp_set_num_threads;

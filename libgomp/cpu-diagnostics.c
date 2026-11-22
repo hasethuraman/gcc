@@ -56,6 +56,25 @@ struct diag_snapshot
 static struct diag_snapshot diag_snapshots[DIAG_SLOTS];
 static unsigned diag_slots;
 
+/* Process-owned buffers retain nested teams created by pool workers too.
+   Formatting and writes run only at explicit flush or library shutdown. */
+#define DIAG_RECORDS 65536
+struct diag_sample_record
+{
+  uint64_t fields[DIAG_FIELDS];
+  bool final, ready;
+};
+struct diag_team_record
+{
+  uint64_t creator, sequence, threads, start, end, work;
+  bool ready;
+};
+static struct diag_sample_record diag_samples[DIAG_RECORDS];
+static struct diag_team_record diag_teams[DIAG_RECORDS];
+static unsigned diag_sample_count, diag_team_count;
+static unsigned diag_samples_emitted, diag_teams_emitted;
+static pthread_mutex_t diag_dump_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static void
 diag_error (const char *operation, int error)
 {
@@ -191,25 +210,42 @@ diag_emit (uint64_t *f, bool final, const char *kind)
   diag_write (line, n, sizeof line);
 }
 
-/* Emit at scope boundaries, not inside the polling loop.  Long blocked
-   intervals retain their actual sample interval rather than a guessed rate. */
+/* Buffer at completed boundaries, never inside the polling loop. */
 static void
-diag_flush (bool final)
+diag_flush (bool final, uint64_t now, uint64_t cpu)
 {
-  uint64_t now, cpu, after;
+  uint64_t after;
+  unsigned slot, field;
+  struct diag_sample_record *record;
   int saved_errno = errno;
   if (!diag.initialized || diag.failed)
     return;
-  now = diag_clock (CLOCK_MONOTONIC);
-  cpu = diag_clock (CLOCK_THREAD_CPUTIME_ID);
+  if (final)
+    {
+      now = diag_clock (CLOCK_MONOTONIC);
+      cpu = diag_clock (CLOCK_THREAD_CPUTIME_ID);
+    }
   diag_account (cpu);
   diag_publish (now, cpu);
-  if (!final && now - diag.last_sample < 250000000ULL)
+  if (!final && now - diag.last_sample < 1000000000ULL)
     {
       errno = saved_errno;
       return;
     }
-  diag_emit (diag_snapshots[diag.slot].fields, final, "boundary");
+  slot = __atomic_fetch_add (&diag_sample_count, 1, __ATOMIC_RELAXED);
+  if (slot >= DIAG_RECORDS)
+    {
+      diag_error ("sample_capacity", EOVERFLOW);
+      errno = saved_errno;
+      return;
+    }
+  record = &diag_samples[slot];
+  for (field = 0; field < DIAG_FIELDS; field++)
+    record->fields[field]
+      = __atomic_load_n (&diag_snapshots[diag.slot].fields[field],
+			 __ATOMIC_RELAXED);
+  record->final = final;
+  __atomic_store_n (&record->ready, true, __ATOMIC_RELEASE);
   after = diag_clock (CLOCK_THREAD_CPUTIME_ID);
   if (after >= cpu)
     diag.observer_cpu += after - cpu;
@@ -277,7 +313,7 @@ gomp_cpu_diag_end (struct gomp_cpu_diag_scope *scope)
 			scope->exclusive_cpu_ns, __ATOMIC_RELAXED);
   diag.scope = scope->parent;
   scope->active = false;
-  diag_flush (false);
+  diag_flush (false, now, cpu);
   errno = saved_errno;
 }
 
@@ -305,10 +341,11 @@ gomp_cpu_diag_team_begin (struct gomp_team *team)
 void
 gomp_cpu_diag_team_end (struct gomp_team *team)
 {
-  char line[512];
   uint64_t before, after, start;
   struct gomp_cpu_diag_scope initial_scope = { 0 };
-  int n, saved_errno = errno;
+  struct diag_team_record *record;
+  unsigned slot;
+  int saved_errno = errno;
   if (!gomp_cpu_diag_enabled || diag.failed)
     return;
   if (!diag.initialized)
@@ -316,16 +353,21 @@ gomp_cpu_diag_team_end (struct gomp_team *team)
   start = diag_clock (CLOCK_MONOTONIC);
   before = diag_clock (CLOCK_THREAD_CPUTIME_ID);
   diag_account (before);
-  n = snprintf (line, sizeof line,
-	"LIBGOMP_CPU_TEAM version=1 pid=%ld creator_tid=%llu team=%llu "
-	"threads=%u start_ns=%llu end_ns=%llu work_cpu_ns=%llu\n",
-	(long) getpid (), (unsigned long long) team->cpu_diag_creator,
-	(unsigned long long) team->cpu_diag_sequence, team->nthreads,
-	(unsigned long long) team->cpu_diag_start,
-	(unsigned long long) diag_clock (CLOCK_MONOTONIC),
-	(unsigned long long) __atomic_load_n (&team->cpu_diag_work,
-					     __ATOMIC_RELAXED));
-  diag_write (line, n, sizeof line);
+  slot = __atomic_fetch_add (&diag_team_count, 1, __ATOMIC_RELAXED);
+  if (slot >= DIAG_RECORDS)
+    {
+      diag_error ("team_capacity", EOVERFLOW);
+      errno = saved_errno;
+      return;
+    }
+  record = &diag_teams[slot];
+  record->creator = team->cpu_diag_creator;
+  record->sequence = team->cpu_diag_sequence;
+  record->threads = team->nthreads;
+  record->start = team->cpu_diag_start;
+  record->end = diag_clock (CLOCK_MONOTONIC);
+  record->work = __atomic_load_n (&team->cpu_diag_work, __ATOMIC_RELAXED);
+  __atomic_store_n (&record->ready, true, __ATOMIC_RELEASE);
   after = diag_clock (CLOCK_THREAD_CPUTIME_ID);
   if (after >= before)
     diag.observer_cpu += after - before;
@@ -338,7 +380,7 @@ gomp_cpu_diag_team_end (struct gomp_team *team)
 static void
 diag_thread_exit (void *unused)
 {
-  diag_flush (true);
+  diag_flush (true, 0, 0);
 }
 
 static void
@@ -346,8 +388,16 @@ diag_child (void)
 {
   memset (&diag, 0, sizeof diag);
   memset (diag_snapshots, 0, sizeof diag_snapshots);
+  memset (diag_samples, 0, sizeof diag_samples);
+  memset (diag_teams, 0, sizeof diag_teams);
   diag_slots = 0;
   diag_team_sequence = diag_errors = 0;
+  diag_sample_count = diag_team_count = 0;
+  diag_samples_emitted = diag_teams_emitted = 0;
+  {
+    pthread_mutex_t fresh = PTHREAD_MUTEX_INITIALIZER;
+    memcpy (&diag_dump_lock, &fresh, sizeof fresh);
+  }
 }
 
 static void __attribute__((constructor))
@@ -368,13 +418,55 @@ diag_initialize (void)
   gomp_cpu_diag_enabled = true;
 }
 
-static void __attribute__((destructor))
-diag_finalize (void)
+/* Called outside streaming operations, before a worker can be terminated. */
+void __attribute__((visibility ("default")))
+GOMP_cpu_diagnostics_flush (void)
 {
+  int saved_errno = errno;
   if (gomp_cpu_diag_enabled)
     {
+      uint64_t cpu, now, after;
       unsigned i, count = __atomic_load_n (&diag_slots, __ATOMIC_ACQUIRE);
-      diag_flush (true);
+      unsigned records;
+      pthread_mutex_lock (&diag_dump_lock);
+      diag_flush (true, 0, 0);
+      cpu = diag_clock (CLOCK_THREAD_CPUTIME_ID);
+      if (diag.initialized)
+	diag_account (cpu);
+      now = diag_clock (CLOCK_MONOTONIC);
+      records = __atomic_load_n (&diag_sample_count, __ATOMIC_ACQUIRE);
+      if (records > DIAG_RECORDS)
+	records = DIAG_RECORDS;
+      for (i = diag_samples_emitted; i < records; i++)
+	{
+	  struct diag_sample_record *record = &diag_samples[i];
+	  if (!__atomic_load_n (&record->ready, __ATOMIC_ACQUIRE))
+	    break;
+	  diag_emit (record->fields, record->final, "boundary");
+	  diag_samples_emitted = i + 1;
+	}
+      records = __atomic_load_n (&diag_team_count, __ATOMIC_ACQUIRE);
+      if (records > DIAG_RECORDS)
+	records = DIAG_RECORDS;
+      for (i = diag_teams_emitted; i < records; i++)
+	{
+	  struct diag_team_record *record = &diag_teams[i];
+	  char line[512];
+	  int n;
+	  if (!__atomic_load_n (&record->ready, __ATOMIC_ACQUIRE))
+	    break;
+	  n = snprintf (line, sizeof line,
+	    "LIBGOMP_CPU_TEAM version=1 pid=%ld creator_tid=%llu team=%llu "
+	    "threads=%llu start_ns=%llu end_ns=%llu work_cpu_ns=%llu\n",
+	    (long) getpid (), (unsigned long long) record->creator,
+	    (unsigned long long) record->sequence,
+	    (unsigned long long) record->threads,
+	    (unsigned long long) record->start,
+	    (unsigned long long) record->end,
+	    (unsigned long long) record->work);
+	  diag_write (line, n, sizeof line);
+	  diag_teams_emitted = i + 1;
+	}
       if (count > DIAG_SLOTS)
 	count = DIAG_SLOTS;
       for (i = 0; i < count; i++)
@@ -400,6 +492,27 @@ diag_finalize (void)
 	  else if ((long) fields[0] != diag.tid)
 	    diag_emit (fields, true, "last_boundary");
 	}
+      after = diag_clock (CLOCK_THREAD_CPUTIME_ID);
+      if (diag.initialized && after >= cpu)
+	{
+	  diag.observer_cpu += after - cpu;
+	  diag.observer_wall += diag_clock (CLOCK_MONOTONIC) - now;
+	  diag.last_cpu = after;
+	}
+      pthread_mutex_unlock (&diag_dump_lock);
+    }
+  errno = saved_errno;
+}
+
+static void __attribute__((destructor))
+diag_finalize (void)
+{
+  GOMP_cpu_diagnostics_flush ();
+  if (gomp_cpu_diag_enabled)
+    {
+      if (diag_samples_emitted != diag_sample_count
+	  || diag_teams_emitted != diag_team_count)
+	diag_error ("unfinished_records", EBUSY);
       pthread_key_delete (diag_key);
     }
 }

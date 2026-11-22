@@ -18,7 +18,7 @@ if test $gcc_cv_have_tls = yes ; then
 	;;
 
     *-*-linux* | *-*-gnu*)
-	XCFLAGS="${XCFLAGS} -ftls-model=initial-exec"
+	XCFLAGS="${XCFLAGS} -ftls-model=initial-exec -DUSING_INITIAL_EXEC_TLS"
 	;;
 
     *-*-rtems*)
@@ -74,7 +74,7 @@ if test x$enable_linux_futex = xyes; then
 	    ;;
 	  *)
 	    if test -z "$with_arch"; then
-	      XCFLAGS="${XCFLAGS} -march=i486 -mtune=${target_cpu}"
+	      XCFLAGS="${XCFLAGS} -march=i486 -mtune=generic"
 	    fi
 	esac
 	;;

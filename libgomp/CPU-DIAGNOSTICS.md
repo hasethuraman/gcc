@@ -38,7 +38,7 @@ are exclusive across nested scopes:
 | `outside_cpu_ns` | Registered-thread CPU outside these scopes; **not attributable to libgomp**. |
 | `observer_cpu_ns`, `observer_wall_ns` | Diagnostic formatting/write costs. Boundary clocks and counter bookkeeping still contribute overhead to the other stages. |
 
-Samples are emitted at scope boundaries, at most once per 250 ms per thread,
+Samples are emitted at scope boundaries, at most once per second per thread,
 and at shutdown. Long blocked intervals keep their actual sample boundaries;
 do not interpolate them as exact fixed-bucket CPU rates. Final
 `snapshot=last_boundary` rows preserve idle workers' last accounted boundary,
@@ -58,6 +58,25 @@ overflow, clock, formatting, write, and unstable-final-snapshot failures are
 explicit diagnostic errors and invalidate the measurement.
 Fork resets diagnostic counters; it does not make inherited OpenMP worker
 pools fork-safe. Diagnostics do not synchronize CUDA operations.
+
+## Completed-call latency
+
+The Linux `gomp_team_barrier_wait_final` wrapper is timed around its complete
+final-barrier operation, including the last-arrival fast path. Under PASSIVE,
+its existing `do_wait` uses the futex path; task handling remains included.
+This is final-barrier caller wall latency, not pure futex time or callback time.
+Two monotonic clocks surround the high-level call, never a spin iteration.
+The existing diagnostics switch enables this instrumentation as well.
+
+`LIBGOMP_LATENCY_SAMPLE` pools completed calls across threads into native
+one-second completion windows. Each row contains the actual count and sum of
+complete wall durations; a wait crossing a window belongs to its completion
+window, not to a sampled unfinished wait age. Empty windows are retained.
+Windows start at the first instrumented entry. Explicit quiescent flushes
+emit full windows; library shutdown emits the final partial and
+`LIBGOMP_LATENCY_END`. The end record declares policy, totals, active calls,
+errors, and the bounded 4,096-window capacity. Loss or active calls invalidate
+qualification. Fork resets these counters too. Formatting stays outside calls.
 
 ## Validation
 

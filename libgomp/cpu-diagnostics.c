@@ -75,6 +75,17 @@ static unsigned diag_sample_count, diag_team_count;
 static unsigned diag_samples_emitted, diag_teams_emitted;
 static pthread_mutex_t diag_dump_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#define LATENCY_WINDOWS 4096
+struct latency_window
+{
+  uint64_t count, wall;
+};
+static struct latency_window latency_windows[LATENCY_WINDOWS];
+static pthread_mutex_t latency_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t latency_origin, latency_calls, latency_wall, latency_active;
+static unsigned latency_emitted;
+static bool latency_final;
+
 static void
 diag_error (const char *operation, int error)
 {
@@ -118,6 +129,120 @@ diag_write (const char *line, int size, size_t capacity)
   while (written < 0 && errno == EINTR);
   if (written != size)
     diag_error ("write", written < 0 ? errno : EIO);
+}
+
+uint64_t
+gomp_latency_diag_begin (void)
+{
+  uint64_t start;
+  int saved_errno = errno;
+  if (!gomp_cpu_diag_enabled)
+    return 0;
+  pthread_mutex_lock (&latency_lock);
+  start = diag_clock (CLOCK_MONOTONIC);
+  if (!latency_origin)
+    latency_origin = start;
+  latency_active++;
+  pthread_mutex_unlock (&latency_lock);
+  errno = saved_errno;
+  return start;
+}
+
+void
+gomp_latency_diag_end (uint64_t start)
+{
+  uint64_t end, index;
+  int saved_errno = errno;
+  if (!start)
+    return;
+  end = diag_clock (CLOCK_MONOTONIC);
+  pthread_mutex_lock (&latency_lock);
+  latency_active--;
+  if (end < start || end < latency_origin)
+    diag_error ("latency_clock_regressed", EOVERFLOW);
+  else
+    {
+      index = (end - latency_origin) / 1000000000ULL;
+      if (index >= LATENCY_WINDOWS)
+	diag_error ("latency_capacity", EOVERFLOW);
+      else if (index < latency_emitted || latency_final)
+	diag_error ("latency_completed_after_drain", EBUSY);
+      else
+	{
+	  latency_windows[index].count++;
+	  latency_windows[index].wall += end - start;
+	  latency_calls++;
+	  latency_wall += end - start;
+	}
+    }
+  pthread_mutex_unlock (&latency_lock);
+  errno = saved_errno;
+}
+
+static void
+diag_latency_dump (bool final)
+{
+  uint64_t now, full;
+  char line[768];
+  int n;
+  const char *policy = getenv ("OMP_WAIT_POLICY");
+  pthread_mutex_lock (&latency_lock);
+  if (latency_final)
+    {
+      pthread_mutex_unlock (&latency_lock);
+      return;
+    }
+  now = diag_clock (CLOCK_MONOTONIC);
+  full = latency_origin && now >= latency_origin
+    ? (now - latency_origin) / 1000000000ULL : 0;
+  if (full >= LATENCY_WINDOWS)
+    {
+      diag_error ("latency_capacity", EOVERFLOW);
+      full = LATENCY_WINDOWS - 1;
+    }
+  /* A completed call can be waiting to acquire this mutex.  Only a
+     quiescent drain may seal windows; its timestamp stays the call return. */
+  if (latency_active && !final)
+    {
+      pthread_mutex_unlock (&latency_lock);
+      return;
+    }
+  while (latency_origin
+	 && (latency_emitted < full || (final && latency_emitted == full)))
+    {
+      unsigned index = latency_emitted;
+      uint64_t start = latency_origin + index * 1000000000ULL;
+      uint64_t end = index < full ? start + 1000000000ULL : now;
+      struct latency_window *window = &latency_windows[index];
+      if (end <= start)
+	break;
+      n = snprintf (line, sizeof line,
+	"LIBGOMP_LATENCY_SAMPLE version=1 pid=%ld "
+	"function=gomp_team_barrier_wait_final sequence=%u "
+	"start_ns=%llu end_ns=%llu count=%llu wall_ns=%llu partial=%d\n",
+	(long) getpid (), index + 1,
+	(unsigned long long) start, (unsigned long long) end,
+	(unsigned long long) window->count,
+	(unsigned long long) window->wall, index == full);
+      diag_write (line, n, sizeof line);
+      latency_emitted++;
+    }
+  if (final)
+    {
+      n = snprintf (line, sizeof line,
+	"LIBGOMP_LATENCY_END version=1 pid=%ld "
+	"function=gomp_team_barrier_wait_final interval_ns=1000000000 "
+	"calls=%llu wall_ns=%llu samples=%u active_calls=%llu "
+	"errors=%llu capacity=%u wait_policy=%s\n",
+	(long) getpid (), (unsigned long long) latency_calls,
+	(unsigned long long) latency_wall, latency_emitted,
+	(unsigned long long) latency_active,
+	(unsigned long long) __atomic_load_n (&diag_errors, __ATOMIC_RELAXED),
+	LATENCY_WINDOWS, policy ? policy : "unset");
+      diag_write (line, n, sizeof line);
+      latency_final = true;
+    }
+  pthread_mutex_unlock (&latency_lock);
 }
 
 static void
@@ -390,6 +515,10 @@ diag_child (void)
   memset (diag_snapshots, 0, sizeof diag_snapshots);
   memset (diag_samples, 0, sizeof diag_samples);
   memset (diag_teams, 0, sizeof diag_teams);
+  memset (latency_windows, 0, sizeof latency_windows);
+  latency_origin = latency_calls = latency_wall = latency_active = 0;
+  latency_emitted = 0;
+  latency_final = false;
   diag_slots = 0;
   diag_team_sequence = diag_errors = 0;
   diag_sample_count = diag_team_count = 0;
@@ -397,6 +526,7 @@ diag_child (void)
   {
     pthread_mutex_t fresh = PTHREAD_MUTEX_INITIALIZER;
     memcpy (&diag_dump_lock, &fresh, sizeof fresh);
+    memcpy (&latency_lock, &fresh, sizeof fresh);
   }
 }
 
@@ -500,6 +630,7 @@ GOMP_cpu_diagnostics_flush (void)
 	  diag.last_cpu = after;
 	}
       pthread_mutex_unlock (&diag_dump_lock);
+      diag_latency_dump (false);
     }
   errno = saved_errno;
 }
@@ -510,6 +641,7 @@ diag_finalize (void)
   GOMP_cpu_diagnostics_flush ();
   if (gomp_cpu_diag_enabled)
     {
+      diag_latency_dump (true);
       if (diag_samples_emitted != diag_sample_count
 	  || diag_teams_emitted != diag_team_count)
 	diag_error ("unfinished_records", EBUSY);

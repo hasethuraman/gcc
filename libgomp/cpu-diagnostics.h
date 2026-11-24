@@ -46,6 +46,8 @@ extern void gomp_cpu_diag_end (struct gomp_cpu_diag_scope *);
 extern void gomp_cpu_diag_worker (void);
 extern void gomp_cpu_diag_team_begin (struct gomp_team *);
 extern void gomp_cpu_diag_team_end (struct gomp_team *);
+extern uint64_t gomp_latency_diag_begin (void);
+extern void gomp_latency_diag_end (uint64_t);
 #else
 #define gomp_cpu_diag_enabled false
 static inline void
@@ -62,6 +64,10 @@ static inline void
 gomp_cpu_diag_team_begin (struct gomp_team *team) {}
 static inline void
 gomp_cpu_diag_team_end (struct gomp_team *team) {}
+static inline uint64_t
+gomp_latency_diag_begin (void) { return 0; }
+static inline void
+gomp_latency_diag_end (uint64_t start) {}
 #endif
 
 static inline void

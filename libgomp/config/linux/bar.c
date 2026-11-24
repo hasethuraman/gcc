@@ -130,10 +130,12 @@ gomp_team_barrier_wait (gomp_barrier_t *bar)
 void
 gomp_team_barrier_wait_final (gomp_barrier_t *bar)
 {
+  uint64_t start = gomp_latency_diag_begin ();
   gomp_barrier_state_t state = gomp_barrier_wait_final_start (bar);
   if (__builtin_expect (state & BAR_WAS_LAST, 0))
     bar->awaited_final = bar->total;
   gomp_team_barrier_wait_end (bar, state);
+  gomp_latency_diag_end (start);
 }
 
 bool
